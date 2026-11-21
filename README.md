@@ -17,7 +17,9 @@ Tini is the simplest `init` you could think of.
 
 All Tini does is spawn a single child (Tini is meant to be run in a container),
 and wait for it to exit all the while reaping zombies and performing
-signal forwarding.
+signal forwarding. When started without a program, Tini waits for SIGTERM,
+SIGINT, SIGHUP, or SIGQUIT and reaps adopted children until it exits. This is
+useful for containers where commands are started separately with `container exec`.
 
 
 Why Tini?

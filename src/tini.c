@@ -233,11 +233,12 @@ void print_usage(char* const name, FILE* const file) {
 	fprintf(file, "%s (%s)\n", bname, TINI_VERSION_STRING);
 
 #if TINI_MINIMAL
-	fprintf(file, "Usage: %s PROGRAM [ARGS] | --version\n\n", bname);
+	fprintf(file, "Usage: %s [PROGRAM [ARGS]] | --version\n\n", bname);
 #else
-	fprintf(file, "Usage: %s [OPTIONS] PROGRAM -- [ARGS] | --version\n\n", bname);
+	fprintf(file, "Usage: %s [OPTIONS] [-- PROGRAM [ARGS]] | --version\n\n", bname);
 #endif
-	fprintf(file, "Execute a program under the supervision of a valid init process (%s)\n\n", bname);
+	fprintf(file, "Execute a program under the supervision of a valid init process (%s).\n", bname);
+	fprintf(file, "Without a program, wait for a termination signal while reaping children.\n\n");
 
 	fprintf(file, "Command line options:\n\n");
 
@@ -389,12 +390,6 @@ int parse_args(const int argc, char* const argv[], char* (**child_args_ptr_ptr)[
 		(**child_args_ptr_ptr)[i] = argv[optind+i];
 	}
 	(**child_args_ptr_ptr)[i] = NULL;
-
-	if (i == 0) {
-		/* User forgot to provide args! */
-		print_usage(name, stderr);
-		return 1;
-	}
 
 	return 0;
 }
@@ -611,6 +606,10 @@ int reap_zombies(const pid_t child_pid, int* const child_exitcode_ptr) {
 }
 
 
+static void idle_signal_handler(int signum) {
+	(void)signum;
+}
+
 int main(int argc, char *argv[]) {
 	pid_t child_pid;
 
@@ -628,6 +627,21 @@ int main(int argc, char *argv[]) {
 	/* Parse environment */
 	if (parse_env()) {
 		return 1;
+	}
+
+	/* PID 1 must have a handler for externally delivered termination signals. */
+	if ((*child_args_ptr)[0] == NULL) {
+		struct sigaction action;
+		memset(&action, 0, sizeof action);
+		action.sa_handler = idle_signal_handler;
+		sigemptyset(&action.sa_mask);
+		int termination_signals[] = {SIGTERM, SIGINT, SIGHUP, SIGQUIT};
+		for (size_t i = 0; i < ARRAY_LEN(termination_signals); i++) {
+			if (sigaction(termination_signals[i], &action, NULL)) {
+				PRINT_FATAL("Failed to configure termination signal: %s", strerror(errno));
+				return 1;
+			}
+		}
 	}
 
 	/* Configure signals */
@@ -661,6 +675,33 @@ int main(int argc, char *argv[]) {
 
 	/* Are we going to reap zombies properly? If not, warn. */
 	reaper_check();
+
+	/* Without a program, stay alive as an init and reap adopted children. */
+	if ((*child_args_ptr)[0] == NULL) {
+		free(child_args_ptr);
+		while (1) {
+			siginfo_t sig;
+			if (reap_zombies(-1, &child_exitcode)) {
+				return 1;
+			}
+			if (sigwaitinfo(&parent_sigset, &sig) == -1) {
+				if (errno == EINTR) {
+					continue;
+				}
+				PRINT_FATAL("Unexpected error in sigwaitinfo: %s", strerror(errno));
+				return 1;
+			}
+			switch (sig.si_signo) {
+				case SIGTERM:
+				case SIGINT:
+				case SIGHUP:
+				case SIGQUIT:
+					return 128 + sig.si_signo;
+				default:
+					break;
+			}
+		}
+	}
 
 	/* Go on */
 	int spawn_ret = spawn(&child_sigconf, *child_args_ptr, &child_pid);
